@@ -31,6 +31,9 @@ class ASTLeafNode(ASTNode):
         self.value = value
         super().__init__()
 
+    def linearize(self) -> list[str]:
+       return [f"{self.vr} = {self.value};"]
+
 ######
 # A number leaf node
 
@@ -43,7 +46,20 @@ class ASTLeafNode(ASTNode):
 class ASTNumNode(ASTLeafNode):
     def __init__(self, value: str) -> None:        
         super().__init__(value)
+        # Check if the value represents a float
+        if '.' in value:
+            self.node_type = Type.FLOAT
+        else:
+            # Treat as INT if no decimal
+            self.node_type = Type.INT
 
+    def linearize(self) -> list[str]:
+        if self.node_type == Type.FLOAT:
+            # Emit float version of load instruction
+            return [f"{self.vr} = float2vr({self.value});"]
+        else:
+            # Emit int version
+            return [f"{self.vr} = int2vr({self.value});"]
 ######
 # A program variable leaf node
 
@@ -57,7 +73,11 @@ class ASTNumNode(ASTLeafNode):
 class ASTVarIDNode(ASTLeafNode):
     def __init__(self, value: str, value_type) -> None:
         super().__init__(value)
-        self.node_type = value_type
+        self.node_type = value_type  # Set type from symbol table
+
+    def linearize(self) -> list[str]:
+        # Load value from variable into virtual register
+        return [f"{self.vr} = {self.value};"]
 
 ######
 # An IO leaf node
@@ -73,7 +93,14 @@ class ASTVarIDNode(ASTLeafNode):
 class ASTIOIDNode(ASTLeafNode):
     def __init__(self, value: str, value_type) -> None:
         super().__init__(value)
-        self.node_type = value_type
+        self.node_type = value_type  # Set type from symbol table
+
+    def linearize(self) -> list[str]:
+        if self.node_type == Type.INT:
+            # Convert input int to virtual register
+            return [f"{self.vr} = int2vr({self.value});"]
+        else:
+            return [f"{self.vr} = float2vr({self.value});"]
 
 ######
 # Binary operation AST Nodes
@@ -83,25 +110,48 @@ class ASTIOIDNode(ASTLeafNode):
 ######
 class ASTBinOpNode(ASTNode):
     def __init__(self, l_child, r_child) -> None:
+        # Set the node type to be the same as the left child
         self.l_child = l_child
         self.r_child = r_child
         super().__init__()
 
+    def linearizeOP(self, opi: str, opf: str) -> list[str]:
+        # Generate the linearized code for the binary operation
+        # based on the types of the children
+        ast = self.l_child.linearize() + self.r_child.linearize()
+        if self.node_type == Type.INT: # Set the operation based on the type
+            op = opi # Integer operation
+        else:
+            op = opf # Float operation
+        # Generate the instruction for the operation
+        # and store the result in the virtual register
+        ast.append(f"{self.vr} = {op}({self.l_child.vr},{self.r_child.vr});")
+        return ast 
+
 class ASTPlusNode(ASTBinOpNode):
     def __init__(self, l_child, r_child) -> None:
         super().__init__(l_child,r_child)
+    
+    def linearize(self) -> list[str]:
+        return self.linearizeOP("addi", "addf")
 
 class ASTMultNode(ASTBinOpNode):
     def __init__(self, l_child, r_child) -> None:
-        super().__init__(l_child,r_child)
+        super().__init__(l_child,r_child) 
+    def linearize(self) -> list[str]:
+        return self.linearizeOP("multi", "multf")
 
 class ASTMinusNode(ASTBinOpNode):
     def __init__(self, l_child, r_child) -> None:
         super().__init__(l_child,r_child)
+    def linearize(self) -> list[str]:
+        return self.linearizeOP("subi", "subf")
 
 class ASTDivNode(ASTBinOpNode):
     def __init__(self, l_child, r_child) ->None:
         super().__init__(l_child,r_child)
+    def linearize(self) -> list[str]:
+        return self.linearizeOP("divi", "divf")
 
 ######
 # Special BinOp nodes for comparisons
@@ -120,11 +170,27 @@ class ASTEqNode(ASTBinOpNode):
     def __init__(self, l_child, r_child) ->None:
         self.node_type = Type.INT
         super().__init__(l_child,r_child)
+    def linearize(self) -> list[str]:
+        ast = self.l_child.linearize() + self.r_child.linearize()
+        if self.l_child.node_type == Type.FLOAT or self.r_child.node_type == Type.FLOAT:
+            op = "eqf"
+        else:
+            op = "eqi"
+        ast.append(f"{self.vr} = {op}({self.l_child.vr}, {self.r_child.vr});")
+        return ast
 
 class ASTLtNode(ASTBinOpNode):
     def __init__(self, l_child, r_child: ASTNode) -> None:
         self.node_type = Type.INT
         super().__init__(l_child,r_child)
+    def linearize(self) -> list[str]:
+        ast = self.l_child.linearize() + self.r_child.linearize()
+        if self.l_child.node_type == Type.FLOAT or self.r_child.node_type == Type.FLOAT:
+            op = "ltf"
+        else:
+            op = "lti"
+        ast.append(f"{self.vr} = {op}({self.l_child.vr}, {self.r_child.vr});")
+        return ast
 
 ######
 # Unary operation AST Nodes
@@ -139,11 +205,20 @@ class ASTUnOpNode(ASTNode):
     def __init__(self, child) -> None:
         self.child = child
         super().__init__()
+    def linearizeOP(self, op: str) -> list[str]:
+        ast = self.child.linearize()
+        ast.append(f"{self.vr} = {op}({self.child.vr});")
+        return ast
         
 class ASTIntToFloatNode(ASTUnOpNode):
     def __init__(self, child) -> None:
         super().__init__(child)
+    def linearize(self) -> list[str]:
+        return self.linearizeOP("vr_int2float")
 
 class ASTFloatToIntNode(ASTUnOpNode):
     def __init__(self, child) -> None:
         super().__init__(child)
+    def linearize(self) -> list[str]:
+        return self.linearizeOP("vr_float2int")
+
